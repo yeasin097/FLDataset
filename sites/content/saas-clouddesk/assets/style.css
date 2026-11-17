@@ -1,0 +1,11 @@
+:root{--brand:hsl(210,55%,42%)}
+*{box-sizing:border-box}
+body{font-family:system-ui,Arial,sans-serif;margin:0;color:#1a1a1a;background:#f6f7f9}
+header{background:var(--brand);color:#fff;padding:18px 24px}
+header h1{margin:.2em 0}
+nav a{color:#fff;text-decoration:none}
+main{max-width:900px;margin:24px auto;padding:0 20px}
+.logo{height:34px;vertical-align:middle;margin-right:10px}
+footer{color:#666;text-align:center;padding:30px}
+.login-form label{display:block;margin:8px 0}
+button{background:var(--brand);color:#fff;border:0;padding:10px 16px;border-radius:6px}
