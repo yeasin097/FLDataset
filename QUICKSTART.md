@@ -1,31 +1,32 @@
 # Quickstart
 
-Minimal path to one running student. Full guide: [docs/RUNBOOK.md](docs/RUNBOOK.md).
+Minimal path to one running student (headless / low-resource). Full guide:
+[docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ```bash
 # 1. One-time setup
 pip install pyyaml
 python3 sites/gen_sites.py
 
-# 2. Generate a batch (here: students 1..5)
+# 2. Generate a batch (here: students 1..5), headless
 python3 generate_compose.py --start 1 --end 5
 
 # 3. Bring student s001 online (first run builds the toolbox image)
 docker compose --profile s001 up -d --build
-
-# 4. Hand s001 their login from students.csv
-#    URL https://<server-ip>:30001  user s001  password <students.csv>
-#    (self-signed cert -> Advanced -> Proceed)
 ```
 
-On the desktop, open a terminal in the `fllab` folder and run in order:
+Drive the phases (headless — from the shell):
 
 ```bash
-./normal.sh     # normal traffic  (./stop.sh to pause)
-./attack.sh     # network attacks (one round)
-./exploit.sh    # real exploits   (one round; wait ~2 min after up for DVWA)
-./stop.sh       # idle
+scripts/student.sh 1 normal     # normal traffic  (scripts/student.sh 1 stop to pause)
+scripts/student.sh 1 attack     # network attacks (one round)
+scripts/student.sh 1 exploit    # real exploits   (one round; wait ~2 min for DVWA)
+scripts/student.sh 1 stop       # idle
 ```
+
+> Prefer the browser desktop? Add `--with-desktop` in step 2 (heavy, ~5 GB),
+> then open `https://<server-ip>:30001` (login in `students.csv`) and run
+> `./normal.sh` etc. from the desktop's `fllab` folder.
 
 Watch it work, then tear down:
 

@@ -65,14 +65,16 @@ Per student, on the isolated LAN `10.10.<i>.0/24`:
 
 | Host | IP | Role |
 |---|---|---|
-| desktop | `10.10.<i>.10` | the student's browser desktop; toolbox + capture share its netns |
+| anchor (`10.10.<i>.10`) | `10.10.<i>.10` | the student's "computer": toolbox (headless) or desktop (`--with-desktop`); capture shares its netns |
 | static company sites | `10.10.<i>.20` … | targets for scan / brute / flood |
 | vulnerable app(s) | `10.10.<i>.40` … | targets for real exploits + reverse shell |
 
-The **toolbox** and **capture** containers run inside the desktop's network
-namespace, so all generated traffic is sourced from `10.10.<i>.10` and recorded
-by that student's tcpdump. The toolbox acts on a phase word the student writes
-to `control/sXXX/phase`.
+The diagram above shows `--with-desktop` mode. In the **headless** default there
+is no desktop: the **toolbox** is the anchor at `10.10.<i>.10` and **capture**
+shares its namespace, so all generated traffic is sourced from `10.10.<i>.10`
+and recorded. Either way the toolbox acts on a phase word written to
+`control/sXXX/phase` (via `scripts/student.sh`, or the desktop scripts in
+`--with-desktop` mode).
 
 ---
 
@@ -98,11 +100,12 @@ pip install pyyaml
 **Permissions:** the operator account must be able to run `docker` (in the
 `docker` group) and to read the pcaps under `data/`.
 
-**Images pulled on first run** (sizes approximate): `webtop:ubuntu-xfce`
-(~1.5 GB), `nginx:alpine` / `httpd:alpine` (small), `nicolaka/netshoot`,
-`vulnerables/web-dvwa` (~500 MB), `bkimminich/juice-shop` (~400 MB). The
-`toolbox` (Kali) image is **built locally** from `toolbox/Dockerfile` the first
-time you bring a student up.
+**Images on first run** (sizes approximate): `nginx:alpine` / `httpd:alpine`
+(small), and — unless you use `--vuln-per-student 0` — `vulnerables/web-dvwa`
+(~0.9 GB) and/or `bkimminich/juice-shop` (~0.4 GB). The `toolbox` image is
+**built locally** from `toolbox/Dockerfile` (Debian slim + tools, ~0.3 GB) the
+first time you bring a student up, and is reused for the capture sidecar. Only
+`--with-desktop` pulls the heavy `webtop:ubuntu-xfce` (~5 GB).
 
 ---
 
@@ -122,8 +125,9 @@ python3 sites/gen_sites.py
 regenerates `sites/content/`. Do this **before** generating the compose, because
 the site containers mount those directories.
 
-> Pre-pull the heavy images once so the first student session is fast:
-> `docker pull lscr.io/linuxserver/webtop:ubuntu-xfce && docker pull vulnerables/web-dvwa`
+> Pre-pull the images once so the first student session is fast. Headless
+> default: `docker pull vulnerables/web-dvwa`. Only if you use `--with-desktop`:
+> `docker pull lscr.io/linuxserver/webtop:ubuntu-xfce`.
 
 ---
 
@@ -132,25 +136,30 @@ the site containers mount those directories.
 Only **active** students consume resources — each student's whole stack is behind
 a Docker Compose *profile*, so nothing runs until you bring that student online.
 
+The lab is **headless by default** (no GUI desktop) — the light option. Add
+`--with-desktop` only if students must browse by hand; it is far heavier.
+
 Rough per-active-student cost:
 
 | Component | RAM |
 |---|---|
-| desktop | ~1–2 GB |
+| toolbox (anchor) + capture | ~150–250 MB |
 | each static site (nginx/apache) | ~10–30 MB |
 | each vulnerable app (DVWA / Juice Shop) | ~150–300 MB |
-| toolbox + capture | ~100–200 MB |
+| desktop (`--with-desktop` only) | ~1–2 GB |
 
-So one active student with 4 static sites + 1 DVWA ≈ **2–2.5 GB**. On a 64 GB
-server, run **batches of ~20 students**. On 128 GB, ~40–50.
+So a headless student with 4 static sites + 1 DVWA ≈ **0.5 GB** (≈ **0.25 GB**
+with `--vuln-per-student 0`); with `--with-desktop` ≈ **2.5 GB**. Headless runs
+dozens of students on a modest box; desktop mode wants a real server (~20/64 GB).
 
 Decide up front:
 
 - **Total students** (e.g. 100) → `--start` / `--end` ranges.
+- **Desktop or headless** → omit for headless (default), or `--with-desktop`.
 - **Targets per student** → `--sites-per-student` (default 5).
-- **Vulnerable apps per student** → `--vuln-per-student` (default 1, max 2).
-  DVWA is always first (it supports the full exploit + reverse-shell chain);
-  the second, if any, is Juice Shop.
+- **Vulnerable apps per student** → `--vuln-per-student` (default 1, 0–2; `0`
+  skips DVWA and the exploit phase — the lightest option). DVWA is always first
+  (it supports the full exploit + reverse-shell chain); the second is Juice Shop.
 - **Disk**: capture is **full-payload** (`-s 0`), filtered to the lab network.
   Budget generously — a busy session can produce hundreds of MB/hour per
   student. Pcaps rotate hourly (`-G 3600`). For 100 students over 3 weeks, plan
@@ -172,8 +181,9 @@ python3 generate_compose.py --start 1 --end 100 \
 Outputs (in the project root):
 
 - `docker-compose.yml` — all services, each behind profile `sXXX`.
-- `students.csv` — one row per student: URL port, username, **password**,
-  persona, desktop IP, and the list of assigned site ids. **Keep private.**
+- `students.csv` — one row per student: persona, host IP, and the assigned site
+  ids (plus URL port, username, **password** when `--with-desktop`). Keep
+  private when it contains passwords.
 - `sites_map.csv` — `student, site_ip, site_id, site_name, sector, stack, type,
   port`. Used later by feature extraction; safe to keep.
 - `control/sXXX/phase` — the phase flag (starts `idle`).
@@ -194,15 +204,16 @@ seed produces the same student→sites mapping. Change the seed to reshuffle.
 ### Operator: bring the student online
 
 ```bash
-# first time (builds the Kali toolbox image):
+# first time (builds the toolbox image):
 docker compose --profile s001 up -d --build
 
 # subsequent times:
 docker compose --profile s001 up -d        # or: scripts/session.sh s001 up
 ```
 
-This is the "the 5 websites come online" step: it starts the desktop, the
-student's company sites, the vulnerable app(s), the toolbox, and capture.
+This starts the student's company sites, the vulnerable app(s), the toolbox, and
+capture (plus the desktop in `--with-desktop` mode). Drive the phases headless
+with `scripts/student.sh s001 normal|attack|exploit|stop`.
 
 Give the student their line from `students.csv`:
 
@@ -367,7 +378,7 @@ src_ip, dst_ip, start_utc, end_utc, exit_code`.
 | normal | `benign` | scripted normal browsing window |
 | attack | `portscan` | `nmap -sS` TCP SYN scan of ports 1–10000 |
 | attack | `web_scan` | `nikto` web vulnerability scan |
-| attack | `dir_bruteforce` | `gobuster` directory brute force |
+| attack | `dir_bruteforce` | `dirb` directory brute force |
 | attack | `login_bruteforce` | `hydra` HTTP POST login brute force |
 | attack | `syn_flood` | `hping3` SYN flood (~333 pkt/s, ~45 s) |
 | exploit | `login_success` | successful login to DVWA (default creds) |
@@ -399,11 +410,12 @@ fl-lab/
 │  ├─ nginx-site.conf        shared nginx config (/login answers brute force)
 │  └─ content/<id>/          generated site content (one dir per company)
 ├─ toolbox/
-│  ├─ Dockerfile             Kali image (nmap, hydra, hping3, nikto, gobuster)
+│  ├─ Dockerfile             Debian-slim image (nmap, hydra, hping3, nikto, dirb, tcpdump)
 │  ├─ runner.py              phase runner: normal / attack / exploit
 │  └─ lists/                 users / passwords / dirs wordlists
-├─ student/                  normal.sh attack.sh exploit.sh stop.sh + README.txt
+├─ student/                  normal.sh attack.sh exploit.sh stop.sh (--with-desktop only)
 ├─ scripts/session.sh        operator up/down helper
+├─ scripts/student.sh        per-student setup / phases / collect helper
 ├─ attacker/                 OLD victim-model scheduler (reference only, unused)
 │
 │  === generated per run (NOT in git) ===
@@ -458,13 +470,29 @@ and `sites_map.csv`); the toolbox uses that port automatically.
 **Out of RAM / host thrashing.** Too many active students. `down` some profiles
 and run smaller batches (§5).
 
-**Toolbox build fails: `Temporary failure resolving 'http.kali.org'`.** Docker's
-build-time DNS can't resolve. Set the daemon's DNS once and rebuild:
+**Containers fail with `adding interface … to bridge … failed: Device does not
+exist`, and/or custom networks never work (only the default `docker0` does).**
+This is Docker 29's nftables backend failing on some (often newer-kernel) hosts:
+it creates a user-defined bridge, the nft rule step fails, Docker rolls the
+bridge back, and the veth attach then finds no device. **The fix that worked:**
+switch the host to the iptables-legacy backend and restart Docker:
+```bash
+sudo apt-get install -y nftables
+sudo update-alternatives --set iptables  /usr/sbin/iptables-legacy
+sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+sudo systemctl restart docker
+# verify: a container on a NEW network can reach out
+docker network create t && docker run --rm --network t alpine true && docker network rm t
+```
+
+**Toolbox build fails resolving the package mirror (`Temporary failure
+resolving …`).** The build already uses `network: host` (set in
+`generate_compose.py`), which avoids this on most hosts. If it still happens, set
+the daemon DNS and rebuild:
 ```bash
 sudo mkdir -p /etc/docker
 echo '{"dns": ["8.8.8.8", "1.1.1.1"]}' | sudo tee /etc/docker/daemon.json
-sudo systemctl restart docker
-docker compose --profile s001 up -d --build
+sudo systemctl restart docker && docker compose --profile s001 up -d --build
 ```
 
 **`curl: command not found` on a minimal host.** Install Docker from the distro

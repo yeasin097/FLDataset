@@ -34,8 +34,13 @@ OUT = "flows"
 os.makedirs(OUT, exist_ok=True)
 
 events = pd.read_csv("logs/events.csv")
+# Convert event times to epoch MILLISECONDS to match nfstream's *_seen_ms.
+# Use .dt.as_unit("ms") so this is correct regardless of the datetime
+# resolution pandas picks (ns vs us) when parsing the ISO strings.
 for c in ("start_utc", "end_utc"):
-    events[c] = pd.to_datetime(events[c], utc=True).astype("int64") // 10**6  # ms
+    events[c] = pd.to_datetime(events[c], utc=True).dt.as_unit("ms").astype("int64")
+if "outcome" not in events.columns:          # older logs without the column
+    events["outcome"] = events["label"].map(lambda v: "benign" if v == "benign" else "attack")
 attacks = events[events.label != "benign"]
 
 smap = pd.read_csv("sites_map.csv")
@@ -62,39 +67,53 @@ def site_of(student, row):
 
 
 def attack_label(student, site_id, row, windows):
+    """Return (label, outcome) for a flow by matching attack/exploit windows."""
     if not site_id:
-        return "benign"
+        return ("benign", "benign")
+    # small ±3s tolerance; the runner leaves >=6s gaps between attacks/exploits
+    # so windows do not overlap and labels do not bleed into each other.
     for w in windows.itertuples():
         if w.site_id == site_id \
-                and row.bidirectional_first_seen_ms <= w.end_utc + 5000 \
-                and row.bidirectional_last_seen_ms >= w.start_utc - 5000:
-            return w.label
-    return "benign"
+                and row.bidirectional_first_seen_ms <= w.end_utc + 3000 \
+                and row.bidirectional_last_seen_ms >= w.start_utc - 3000:
+            return (w.label, getattr(w, "outcome", "attack"))
+    return ("benign", "benign")
 
 
 for folder in sorted(glob.glob("data/s*")):
     s = os.path.basename(folder)
     frames = []
     for pcap in sorted(glob.glob(f"{folder}/*.pcap")):
-        df = NFStreamer(source=pcap, statistical_analysis=True).to_pandas()
-        if not df.empty:
-            frames.append(df)
+        try:
+            df = NFStreamer(source=pcap, statistical_analysis=True).to_pandas()
+        except Exception as e:                         # unreadable / truncated
+            print(f"  skip {pcap}: {e}")
+            continue
+        # nfstream returns None for a pcap it cannot parse (e.g. an empty file,
+        # or Linux "cooked" SLL2 frames from `tcpdump -i any`). Capture writes
+        # standard Ethernet (capture.sh), so this is just a safety net.
+        if df is None or df.empty:
+            continue
+        frames.append(df)
     if not frames:
         continue
     df = pd.concat(frames, ignore_index=True)
     windows = attacks[attacks.student == s]
 
-    site_ids, site_names, sectors, labels = [], [], [], []
+    site_ids, site_names, sectors, labels, outcomes = [], [], [], [], []
     for r in df.itertuples():
         sid_, sname, sector = site_of(s, r)
+        lbl, oc = attack_label(s, sid_, r, windows)
         site_ids.append(sid_)
         site_names.append(sname)
         sectors.append(sector)
-        labels.append(attack_label(s, sid_, r, windows))
+        labels.append(lbl)
+        outcomes.append(oc)
     df["site_id"] = site_ids
     df["site_name"] = site_names
     df["sector"] = sectors
     df["label"] = labels
+    df["outcome"] = outcomes
 
     df["src_ip"] = df["src_ip"].map(anon)
     df["dst_ip"] = df["dst_ip"].map(anon)

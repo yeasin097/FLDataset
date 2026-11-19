@@ -13,6 +13,8 @@
 #
 # N is your assigned student number (e.g. 7). The operator also gives you the
 # shared SEED; set it once:  export FLLAB_SEED=42
+# Default is the light headless setup. For the browser desktop, set once:
+#   export FLLAB_DESKTOP=1
 set -euo pipefail
 N="${1:?usage: student.sh <student-number> <setup|normal|attack|exploit|stop|status|collect|down>}"
 CMD="${2:-setup}"
@@ -26,14 +28,16 @@ phase() { echo "$1" > "control/$S/phase"; echo "[$S] phase -> $1"; }
 case "$CMD" in
   setup)
     [ -d sites/content ] || python3 sites/gen_sites.py
-    python3 generate_compose.py --start "$N" --end "$N" --seed "$SEED"
+    DESK=""; [ "${FLLAB_DESKTOP:-0}" = "1" ] && DESK="--with-desktop"
+    python3 generate_compose.py --start "$N" --end "$N" --seed "$SEED" $DESK
     docker compose --profile "$S" up -d --build
     echo
-    echo "Stack is up. Open the desktop in your browser:"
-    echo "    https://localhost:${PORT}    user: ${S}"
-    echo "    password: see the 'password' column in students.csv"
-    echo "    (self-signed cert -> Advanced -> Proceed)"
-    echo "Then drive phases:  ./scripts/student.sh ${N} normal   (etc.)"
+    echo "Stack is up. Drive phases:"
+    echo "    ./scripts/student.sh ${N} normal   (then attack / exploit / stop)"
+    if [ -n "$DESK" ]; then
+      echo "Browser desktop: https://localhost:${PORT}  user ${S}  (password in students.csv)"
+      echo "    (self-signed cert -> Advanced -> Proceed)"
+    fi
     ;;
   normal|attack|exploit) phase "$CMD" ;;
   stop|idle)              phase idle ;;

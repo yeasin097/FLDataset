@@ -20,8 +20,13 @@ Your operator gives you two things:
 
 - Windows 10 (version 2004+) or Windows 11, with **administrator** rights.
 - **Virtualization enabled** in BIOS/UEFI (most modern laptops: on by default).
-- ~8 GB free disk and ~4 GB free RAM while the lab runs.
-- Internet (to download Docker images the first time, ~6 GB).
+- ~4 GB free disk and ~2 GB free RAM while the lab runs (headless default).
+- Internet (to download Docker images the first time, ~1.5 GB).
+
+> This guide uses the **headless** setup (no GUI desktop) — the light option
+> that fits a normal laptop. The toolbox generates all the traffic for you. If
+> you were told to use the browser desktop instead, set `export FLLAB_DESKTOP=1`
+> before `setup` (needs ~6 GB disk / ~4 GB RAM).
 
 ---
 
@@ -102,28 +107,21 @@ cd ~/fl-lab
 ./scripts/student.sh "$FLLAB_N" setup
 ```
 
-This builds and starts your stack (first run downloads ~6 GB and builds the
-toolbox — give it 10–20 minutes). When it finishes it prints your desktop URL,
-for example:
-
-```
-https://localhost:30007     user: s007     password: see students.csv
-```
-
-Open that in your browser. The certificate is self-signed → click
-**Advanced → Proceed**. You now have your lab desktop.
+This builds and starts your stack (first run downloads ~1.5 GB and builds the
+toolbox — give it 5–15 minutes). When it finishes it tells you how to drive the
+phases. There is no GUI in the headless default — the toolbox generates the
+traffic; you just trigger the phases in step 5.
 
 ---
 
 ## 5. Daily work (~30–45 min/day, ~3 weeks)
 
-Each day, drive the phases from the Ubuntu terminal (you can also browse the
-sites yourself in the desktop browser during `normal`):
+Each day, drive the phases from the Ubuntu terminal:
 
 ```bash
 cd ~/fl-lab
-./scripts/student.sh "$FLLAB_N" normal     # start normal browsing traffic
-# ... use it for a while, browse the sites in the desktop ...
+./scripts/student.sh "$FLLAB_N" normal     # start normal traffic
+# ... let it run for a while ...
 ./scripts/student.sh "$FLLAB_N" stop       # pause
 
 ./scripts/student.sh "$FLLAB_N" attack     # one round of network attacks
@@ -187,13 +185,23 @@ don't use it for anything else.
 **`docker ps` says "Cannot connect to the Docker daemon".**
 `sudo systemctl start docker` (or you skipped the systemd step in §1).
 
-**Toolbox build fails with `Temporary failure resolving 'http.kali.org'`.**
-Docker's build DNS. Fix it once:
+**Toolbox build fails resolving the package mirror (`Temporary failure
+resolving …`).** Set Docker's DNS once and retry:
 ```bash
 sudo mkdir -p /etc/docker
 echo '{"dns": ["8.8.8.8", "1.1.1.1"]}' | sudo tee /etc/docker/daemon.json
 sudo systemctl restart docker
 ./scripts/student.sh "$FLLAB_N" setup
+```
+
+**Containers fail with `… bridge … Device does not exist` (custom networks
+don't work).** Docker's nftables backend is misbehaving. Switch to the legacy
+backend and restart Docker:
+```bash
+sudo apt-get install -y nftables
+sudo update-alternatives --set iptables  /usr/sbin/iptables-legacy
+sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+sudo systemctl restart docker
 ```
 
 **`wsl --install` fails / "virtualization not enabled".**

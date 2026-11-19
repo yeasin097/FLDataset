@@ -2,22 +2,28 @@
 """
 Generate docker-compose.yml for N students (source model, with vulnerable tier).
 
+Two modes:
+  * HEADLESS (default)  -- lightest; runs on a low-end PC. No GUI desktop. The
+    toolbox container is the network anchor and generates all traffic; capture
+    shares its namespace. Students drive phases from the shell (scripts/student.sh
+    or `echo attack > control/sXXX/phase`).
+  * --with-desktop       -- adds a browser-based Linux desktop (webtop) per
+    student so they can also browse the sites by hand. Much heavier (~5 GB image,
+    ~2 GB RAM per student).
+
 Each student gets:
-  - desktop : a full Linux desktop in the browser (the student works here)
   - static company sites : lightweight nginx/apache containers on the student's
                            own isolated LAN (targets for scan / brute / flood).
-  - vulnerable apps : real DVWA / Juice Shop containers (targets for the exploit
-                      phase: SQLi, command injection, reverse shell + exfil).
-  - toolbox : a Kali sidecar in the desktop's network namespace that generates
-              the student's normal traffic and runs attacks / exploits on
-              demand, sourced from the desktop IP and recorded by capture.
-  - capture : tcpdump in the same namespace. Full payloads (-s 0) but FILTERED
-              to the lab network (net 10.10.0.0/16), so the student's real
-              internet browsing payloads are never recorded (privacy).
+  - vulnerable apps      : real DVWA / Juice Shop containers (exploit targets).
+                           Use --vuln-per-student 0 for the lightest setup.
+  - toolbox              : Debian sidecar; normal-traffic generator + attack /
+                           exploit runner. Also the capture image (ships tcpdump).
+  - capture              : tcpdump in the anchor's namespace. Full payloads
+                           (-s 0) filtered to the lab network (net 10.10.0.0/16),
+                           so real internet browsing payloads are never recorded.
 
 Every student's whole stack is behind a compose PROFILE named after the student
-(s001, s002, ...), so only ACTIVE students consume resources. Bring one online
-with:  docker compose --profile s001 up -d   (or scripts/session.sh s001 up)
+(s001, ...), so only ACTIVE students consume resources.
 
 A company / app id is the SAME organization for every student who draws it, so
 flows can be merged per organization using sites_map.csv + logs/events.csv.
@@ -48,6 +54,7 @@ PERSONAS = [
 ]
 
 NGINX_CONF = "./sites/nginx-site.conf"
+TOOLBOX_IMAGE = "fl-lab/toolbox:latest"     # built once, reused for capture
 
 
 def sid(i):
@@ -68,27 +75,27 @@ def _map_row(student, entry):
     }
 
 
-def build(start, end, base_port, seed, n_sites, n_vuln):
-    rnd = random.Random(seed)
+def build(start, end, base_port, seed, n_sites, n_vuln, with_desktop):
     catalog = companies()
     vcatalog = vuln_apps()
     n_vuln = min(n_vuln, len(vcatalog))
     n_static = max(0, n_sites - n_vuln)
     services, networks, students, site_map_rows = {}, {}, [], []
 
-    # Shared internet network for desktops. ICC disabled = desktops cannot
-    # talk to each other, only to the internet.
-    networks["wan"] = {
-        "driver": "bridge",
-        "driver_opts": {"com.docker.network.bridge.enable_icc": "false"},
-        "ipam": {"config": [{"subnet": "172.30.0.0/16"}]},
-    }
+    # The wan (internet) network only exists to give desktops internet. In
+    # headless mode there are no desktops, so the whole lab is air-gapped.
+    if with_desktop:
+        networks["wan"] = {
+            "driver": "bridge",
+            "driver_opts": {"com.docker.network.bridge.enable_icc": "false"},
+            "ipam": {"config": [{"subnet": "172.30.0.0/16"}]},
+        }
 
     for i in range(start, end + 1):
         s = sid(i)
         lan = f"{s}_lan"
         profile = [s]
-        desktop_ip = f"10.10.{i}.10"
+        host_ip = f"10.10.{i}.10"            # the student's "computer" on the LAN
         password = secrets.token_urlsafe(9)
         port = base_port + i
         persona = PERSONAS[(i - 1) % len(PERSONAS)]
@@ -96,7 +103,7 @@ def build(start, end, base_port, seed, n_sites, n_vuln):
         # Deterministic per-student mix of companies (non-IID by site mix).
         srnd = random.Random(seed * 1000 + i)
         statics = srnd.sample(catalog, k=n_static)
-        vulns = vcatalog[:n_vuln]               # dvwa first -> full exploit chain
+        vulns = vcatalog[:n_vuln]            # dvwa first -> full exploit chain
 
         # internal: true -> no route to the internet. Attacks stay inside.
         networks[lan] = {
@@ -105,27 +112,29 @@ def build(start, end, base_port, seed, n_sites, n_vuln):
             "ipam": {"config": [{"subnet": f"10.10.{i}.0/24"}]},
         }
 
-        services[f"{s}-desktop"] = {
-            "image": "lscr.io/linuxserver/webtop:ubuntu-xfce",
-            "hostname": s,
-            "environment": {
-                "PUID": "1000", "PGID": "1000", "TZ": "Asia/Dhaka",
-                "CUSTOM_USER": s, "PASSWORD": password,
-            },
-            "shm_size": "1gb",
-            "security_opt": ["seccomp=unconfined"],
-            "mem_limit": "2g",
-            "ports": [f"{port}:3001"],          # HTTPS desktop in browser
-            "volumes": [
-                "./student:/config/Desktop/fllab:ro",
-                # sibling (not nested) so the writable control mount does not
-                # need a mountpoint created inside the read-only scripts mount
-                f"./control/{s}:/config/Desktop/fllab-control",
-            ],
-            "networks": {"wan": {}, lan: {"ipv4_address": desktop_ip}},
-            "profiles": profile,
-            "restart": "unless-stopped",
-        }
+        # Optional browser desktop (heavy). When present it is the net anchor.
+        if with_desktop:
+            services[f"{s}-desktop"] = {
+                "image": "lscr.io/linuxserver/webtop:ubuntu-xfce",
+                "hostname": s,
+                "environment": {
+                    "PUID": "1000", "PGID": "1000", "TZ": "Asia/Dhaka",
+                    "CUSTOM_USER": s, "PASSWORD": password,
+                },
+                "shm_size": "1gb",
+                "security_opt": ["seccomp=unconfined"],
+                "mem_limit": "2g",
+                "ports": [f"{port}:3001"],
+                "volumes": [
+                    "./student:/config/Desktop/fllab:ro",
+                    f"./control/{s}:/config/Desktop/fllab-control",
+                ],
+                "networks": {"wan": {}, lan: {"ipv4_address": host_ip}},
+                "profiles": profile,
+                "restart": "unless-stopped",
+            }
+
+        anchor = f"{s}-desktop" if with_desktop else f"{s}-toolbox"
 
         sites_json = []
 
@@ -153,52 +162,52 @@ def build(start, end, base_port, seed, n_sites, n_vuln):
         # Vulnerable apps (IPs .40..)
         for k, v in enumerate(vulns):
             site_ip = f"10.10.{i}.{40 + k}"
-            svc = f"{s}-vuln-{v['id']}"
-            spec = {
+            services[f"{s}-vuln-{v['id']}"] = {
                 "image": v["image"],
                 "hostname": v["id"],
                 "networks": {lan: {"ipv4_address": site_ip}},
                 "profiles": profile,
                 "restart": "unless-stopped",
             }
-            services[svc] = spec
             entry = {"id": v["id"], "name": v["name"], "sector": v["sector"],
                      "ip": site_ip, "stack": v["stack"], "type": v["type"],
                      "port": v["port"]}
             sites_json.append(entry)
             site_map_rows.append(_map_row(s, entry))
 
-        # Kali toolbox: normal-traffic generator + attack/exploit runner, in the
-        # desktop's network namespace so its traffic is the student's traffic.
-        services[f"{s}-toolbox"] = {
+        # Toolbox: traffic generator + attack/exploit runner.
+        toolbox = {
             # network: host so the image build can reach package mirrors even
             # when the build sandbox's own DNS/bridge is misconfigured.
             "build": {"context": "./toolbox", "network": "host"},
-            "network_mode": f"service:{s}-desktop",
+            "image": TOOLBOX_IMAGE,
             "cap_add": ["NET_ADMIN", "NET_RAW"],
             "environment": {
-                "STUDENT": s, "DESKTOP_IP": desktop_ip, "SEED": str(seed),
+                "STUDENT": s, "DESKTOP_IP": host_ip, "SEED": str(seed),
             },
             "volumes": ["./logs:/logs", f"./control/{s}:/control"],
-            "depends_on": [f"{s}-desktop"],
             "profiles": profile,
             "restart": "unless-stopped",
         }
+        if with_desktop:
+            toolbox["network_mode"] = f"service:{s}-desktop"
+            toolbox["depends_on"] = [f"{s}-desktop"]
+        else:
+            # headless: the toolbox IS the student's computer on the LAN
+            toolbox["hostname"] = s
+            toolbox["networks"] = {lan: {"ipv4_address": host_ip}}
+        services[f"{s}-toolbox"] = toolbox
 
+        # Capture: tcpdump, reusing the toolbox image. Shares the anchor's netns.
+        # capture.sh picks the LAN interface (not -i any, which writes SLL2
+        # frames nfstream cannot parse) and filters to the lab network.
         services[f"{s}-capture"] = {
-            "image": "nicolaka/netshoot",
-            "network_mode": f"service:{s}-desktop",
+            "image": TOOLBOX_IMAGE,
+            "network_mode": f"service:{anchor}",
             "cap_add": ["NET_ADMIN", "NET_RAW"],
-            # -s 0: full payloads (needed for exploit/post-exploit detection).
-            # Filter to the lab network so the student's real internet browsing
-            # payloads are never captured. -G 3600: new pcap file every hour.
-            "command": [
-                "tcpdump", "-i", "any", "-n", "-s", "0", "-G", "3600",
-                "-w", "/pcap/%Y%m%d-%H%M%S.pcap", "-Z", "root",
-                "net", "10.10.0.0/16",
-            ],
+            "entrypoint": ["/opt/capture.sh"],
             "volumes": [f"./data/{s}:/pcap"],
-            "depends_on": [f"{s}-desktop"],
+            "depends_on": [anchor],
             "profiles": profile,
             "restart": "unless-stopped",
         }
@@ -211,12 +220,12 @@ def build(start, end, base_port, seed, n_sites, n_vuln):
             json.dump(sites_json, f, indent=2)
         os.makedirs(f"data/{s}", exist_ok=True)
 
-        students.append({
-            "student": s, "url_port": port, "username": s,
-            "password": password, "persona": persona,
-            "desktop_ip": desktop_ip,
-            "sites": ";".join(e["id"] for e in sites_json),
-        })
+        row = {"student": s, "persona": persona, "host_ip": host_ip,
+               "sites": ";".join(e["id"] for e in sites_json)}
+        if with_desktop:
+            row = {"student": s, "url_port": port, "username": s,
+                   "password": password, **row}
+        students.append(row)
 
     return {"services": services, "networks": networks}, students, site_map_rows
 
@@ -230,13 +239,17 @@ def main():
     ap.add_argument("--sites-per-student", type=int, default=5,
                     help="total targets per student (static + vulnerable)")
     ap.add_argument("--vuln-per-student", type=int, default=1,
-                    help="how many of them are real vulnerable apps (max 2)")
+                    help="how many of them are real vulnerable apps (0-2); "
+                         "0 = lightest, no exploit phase")
+    ap.add_argument("--with-desktop", action="store_true",
+                    help="add the heavy browser GUI desktop per student "
+                         "(default: headless, low-resource)")
     a = ap.parse_args()
     assert 1 <= a.start <= a.end <= 250
 
     compose, students, site_map = build(
         a.start, a.end, a.base_port, a.seed,
-        a.sites_per_student, a.vuln_per_student)
+        a.sites_per_student, a.vuln_per_student, a.with_desktop)
 
     with open("docker-compose.yml", "w") as f:
         yaml.safe_dump(compose, f, sort_keys=False)
@@ -253,11 +266,13 @@ def main():
 
     n = len(students)
     n_vuln = min(a.vuln_per_student, 2)
-    print(f"Wrote docker-compose.yml, students.csv, sites_map.csv for {n} students.")
+    mode = "with-desktop" if a.with_desktop else "headless"
+    print(f"Wrote docker-compose.yml, students.csv, sites_map.csv for {n} students ({mode}).")
     print(f"Each student: {a.sites_per_student - n_vuln} static sites + "
           f"{n_vuln} vulnerable app(s), behind a profile.")
     print("Bring a student online:  docker compose --profile s001 up -d")
-    print("Keep students.csv private: it contains passwords.")
+    if a.with_desktop:
+        print("Keep students.csv private: it contains desktop passwords.")
 
 
 if __name__ == "__main__":

