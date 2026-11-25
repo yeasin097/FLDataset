@@ -75,7 +75,11 @@ def _map_row(student, entry):
     }
 
 
-def build(start, end, base_port, seed, n_sites, n_vuln, with_desktop):
+def build(roster, base_port, seed, n_sites, n_vuln, with_desktop):
+    # roster: list of {"sid","slot","key"}. "sid" is the student label (any id,
+    # e.g. s7 or s223009712); "slot" (1-250) is the LAN octet for IP/port; "key"
+    # seeds the per-student company mix. In self-host mode every student can use
+    # the same slot (they are isolated), distinguished only by their sid label.
     catalog = companies()
     vcatalog = vuln_apps()
     n_vuln = min(n_vuln, len(vcatalog))
@@ -91,17 +95,19 @@ def build(start, end, base_port, seed, n_sites, n_vuln, with_desktop):
             "ipam": {"config": [{"subnet": "172.30.0.0/16"}]},
         }
 
-    for i in range(start, end + 1):
-        s = sid(i)
+    for st in roster:
+        s = st["sid"]
+        slot = st["slot"]
+        key = st["key"]
         lan = f"{s}_lan"
         profile = [s]
-        host_ip = f"10.10.{i}.10"            # the student's "computer" on the LAN
+        host_ip = f"10.10.{slot}.10"          # the student's "computer" on the LAN
         password = secrets.token_urlsafe(9)
-        port = base_port + i
-        persona = PERSONAS[(i - 1) % len(PERSONAS)]
+        port = base_port + slot
+        persona = PERSONAS[(key - 1) % len(PERSONAS)]
 
         # Deterministic per-student mix of companies (non-IID by site mix).
-        srnd = random.Random(seed * 1000 + i)
+        srnd = random.Random(seed * 1000 + key)
         statics = srnd.sample(catalog, k=n_static)
         vulns = vcatalog[:n_vuln]            # dvwa first -> full exploit chain
 
@@ -109,7 +115,7 @@ def build(start, end, base_port, seed, n_sites, n_vuln, with_desktop):
         networks[lan] = {
             "driver": "bridge",
             "internal": True,
-            "ipam": {"config": [{"subnet": f"10.10.{i}.0/24"}]},
+            "ipam": {"config": [{"subnet": f"10.10.{slot}.0/24"}]},
         }
 
         # Optional browser desktop (heavy). When present it is the net anchor.
@@ -140,7 +146,7 @@ def build(start, end, base_port, seed, n_sites, n_vuln, with_desktop):
 
         # Static company sites (IPs .20..)
         for k, c in enumerate(statics):
-            site_ip = f"10.10.{i}.{20 + k}"
+            site_ip = f"10.10.{slot}.{20 + k}"
             svc = f"{s}-site-{c['id']}"
             vols = [f"./sites/content/{c['id']}:{c['docroot']}:ro"]
             if c["stack"] == "nginx":
@@ -161,7 +167,7 @@ def build(start, end, base_port, seed, n_sites, n_vuln, with_desktop):
 
         # Vulnerable apps (IPs .40..)
         for k, v in enumerate(vulns):
-            site_ip = f"10.10.{i}.{40 + k}"
+            site_ip = f"10.10.{slot}.{40 + k}"
             services[f"{s}-vuln-{v['id']}"] = {
                 "image": v["image"],
                 "hostname": v["id"],
@@ -232,6 +238,14 @@ def build(start, end, base_port, seed, n_sites, n_vuln, with_desktop):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--id", default=None,
+                    help="a single student's real id/label (e.g. 223009712). "
+                         "Self-host mode: uses one LAN slot (--slot). "
+                         "Overrides --start/--end.")
+    ap.add_argument("--slot", type=int, default=1,
+                    help="LAN octet (1-250) for --id mode: IP 10.10.<slot>.x "
+                         "and port base+slot. Self-hosted students are isolated, "
+                         "so the default 1 is fine for everyone.")
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--end", type=int, default=25)
     ap.add_argument("--base-port", type=int, default=30000)
@@ -245,10 +259,21 @@ def main():
                     help="add the heavy browser GUI desktop per student "
                          "(default: headless, low-resource)")
     a = ap.parse_args()
-    assert 1 <= a.start <= a.end <= 250
+
+    if a.id is not None:
+        assert 1 <= a.slot <= 250, "--slot must be 1-250"
+        try:
+            key = int(a.id)                  # numeric ids seed the company mix
+        except ValueError:
+            key = abs(hash(a.id)) % 10**9
+        roster = [{"sid": f"s{a.id}", "slot": a.slot, "key": key}]
+    else:
+        assert 1 <= a.start <= a.end <= 250
+        roster = [{"sid": sid(i), "slot": i, "key": i}
+                  for i in range(a.start, a.end + 1)]
 
     compose, students, site_map = build(
-        a.start, a.end, a.base_port, a.seed,
+        roster, a.base_port, a.seed,
         a.sites_per_student, a.vuln_per_student, a.with_desktop)
 
     with open("docker-compose.yml", "w") as f:
@@ -270,7 +295,8 @@ def main():
     print(f"Wrote docker-compose.yml, students.csv, sites_map.csv for {n} students ({mode}).")
     print(f"Each student: {a.sites_per_student - n_vuln} static sites + "
           f"{n_vuln} vulnerable app(s), behind a profile.")
-    print("Bring a student online:  docker compose --profile s001 up -d")
+    first = students[0]["student"]
+    print(f"Bring a student online:  docker compose --profile {first} up -d")
     if a.with_desktop:
         print("Keep students.csv private: it contains desktop passwords.")
 

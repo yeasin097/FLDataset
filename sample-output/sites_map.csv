@@ -1,0 +1,6 @@
+student,site_ip,site_id,site_name,sector,stack,type,port
+s001,10.10.1.20,agri-harvestfields,Harvest Fields Agro,agriculture,apache,static,80
+s001,10.10.1.21,hotel-grandvista,Grand Vista Hotels,hospitality,nginx,static,80
+s001,10.10.1.22,air-skyroute,SkyRoute Airlines,airline,apache,static,80
+s001,10.10.1.23,arch-formworks,FormWorks Architects,architecture,apache,static,80
+s001,10.10.1.40,vuln-dvwa,Damn Vulnerable Web App,vulnerable-webapp,php,dvwa,80

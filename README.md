@@ -48,9 +48,9 @@ from by hand; that is much heavier (~5 GB image, ~2 GB RAM each).
 > **Running the experiment end to end?** See the full operator guide in
 > [docs/RUNBOOK.md](docs/RUNBOOK.md) — setup, batches, per-session steps,
 > monitoring, dataset extraction, label reference, and troubleshooting.
-> **Students self-hosting on their own laptop?** See
-> [docs/WSL-STUDENT.md](docs/WSL-STUDENT.md) — run one client in WSL2, collect,
-> send data, uninstall cleanly.
+> **Hand this to students** → [docs/STUDENT.md](docs/STUDENT.md): everything a
+> student does on their own Windows laptop with WSL2 — install, run the daily
+> phases, send their data, uninstall. Nothing else needed.
 
 ## Server requirements
 
