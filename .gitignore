@@ -1,0 +1,16 @@
+# Generated per run by generate_compose.py / the lab — never commit these.
+docker-compose.yml
+students.csv            # contains desktop passwords
+sites_map.csv
+control/
+data/                   # raw pcaps
+logs/                   # events.csv ground truth
+flows/                  # extracted per-student datasets
+sample-output/
+
+# Python
+__pycache__/
+*.pyc
+
+# collected result bundles
+fllab-*.tgz

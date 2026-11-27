@@ -70,12 +70,12 @@ def attack_label(student, site_id, row, windows):
     """Return (label, outcome) for a flow by matching attack/exploit windows."""
     if not site_id:
         return ("benign", "benign")
-    # small ±3s tolerance; the runner leaves >=6s gaps between attacks/exploits
+    # small ±1.5s tolerance; the runner leaves >=4s gaps between attacks/exploits
     # so windows do not overlap and labels do not bleed into each other.
     for w in windows.itertuples():
         if w.site_id == site_id \
-                and row.bidirectional_first_seen_ms <= w.end_utc + 3000 \
-                and row.bidirectional_last_seen_ms >= w.start_utc - 3000:
+                and row.bidirectional_first_seen_ms <= w.end_utc + 1500 \
+                and row.bidirectional_last_seen_ms >= w.start_utc - 1500:
             return (w.label, getattr(w, "outcome", "attack"))
     return ("benign", "benign")
 

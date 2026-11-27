@@ -47,8 +47,9 @@ In the **Ubuntu** window, copy-paste these lines:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git
-git clone https://github.com/yeasin097/FLDataset.git ~/fl-lab
-cd ~/fl-lab
+mkdir 230010112
+cd 230010112
+git clone https://github.com/yeasin097/FLDataset.git .
 bash scripts/setup.sh
 ```
 
